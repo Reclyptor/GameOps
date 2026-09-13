@@ -1,0 +1,15 @@
+# Local build and test scratch
+/.build/
+/bin/
+/tests/.tmp/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Secrets never belong here
+.env
+.env.*
+!.env.example
