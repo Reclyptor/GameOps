@@ -1,0 +1,11 @@
+.git
+.github
+.build
+tests
+*.md
+!docs/CONTRACT.md
+.env
+.env.*
+.gitignore
+.dockerignore
+.shellcheckrc

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Invoked by the gameops binary: source the helper library and the adapter,
+# then run one function.  adapter-exec <function> [args]
+#   --vars            print the adapter's variables as KEY=value
+#   --supports <fn>   exit 0 when the adapter overrides an optional function
+#   --start-cmd       run game_start_cmd and print GAME_CMD NUL-separated
+set -uo pipefail
+: "${GAMEOPS_HOME:=/opt/gameops}"
+
+# shellcheck source=shim/adapter.sh
+source "${GAMEOPS_HOME}/shim/adapter.sh"
+adapter_load
+
+case "${1:-}" in
+    --vars)
+        for name in GAME_NAME GAME_DIR GAME_PORT GAME_PORT_PROTO GAME_LOG SERVER_NAME; do
+            printf '%s=%s\n' "$name" "${!name:-}"
+        done
+        for name in game_install game_version game_start_cmd game_ready game_backup_paths; do
+            declare -F "$name" >/dev/null 2>&1 || die "adapter must define ${name}()"
+        done
+        [[ "${GAME_NAME:-}" =~ ^[a-z0-9-]+$ ]] || die "GAME_NAME must be lowercase [a-z0-9-], got '${GAME_NAME:-}'"
+        ;;
+    --supports)
+        adapter_supports "${2:?function name}"
+        ;;
+    --start-cmd)
+        declare -a GAME_CMD=()
+        game_start_cmd || exit 1
+        (( ${#GAME_CMD[@]} > 0 )) || die "game_start_cmd produced an empty GAME_CMD"
+        printf '%s\0' "${GAME_CMD[@]}"
+        ;;
+    "")
+        die "adapter-exec: function name required"
+        ;;
+    *)
+        fn=$1; shift
+        declare -F "$fn" >/dev/null 2>&1 || die "adapter has no function ${fn}"
+        "$fn" "$@"
+        ;;
+esac

@@ -1,0 +1,8 @@
+external-sources=true
+source-path=SCRIPTDIR
+source-path=shim
+
+# Adapter contract functions have fixed arity defined by docs/CONTRACT.md. The
+# shim's default implementations forward "$@" so an adapter override with
+# arguments works unchanged; shellcheck reads that as "callers forgot $@".
+disable=SC2119
