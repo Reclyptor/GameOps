@@ -30,7 +30,8 @@ func (s *Store) Init() error {
 		return fmt.Errorf("cannot create state dir %s: %w", s.Dir, err)
 	}
 	for _, f := range []string{"server.pid", "server.rc", "server.started", "server.version", "ready", "players",
-		"update.requested", "update.available", "update.failed", "restore.requested", "stop.requested", "console.fifo"} {
+		"update.requested", "update.available", "update.failed", "restore.requested", "stop.requested",
+		"drain.requested", "console.fifo"} {
 		os.Remove(s.path(f))
 	}
 	os.RemoveAll(s.path("counters"))
@@ -150,7 +151,7 @@ func (s *Store) ClearFlag(name string)    { os.Remove(s.path(name)) }
 // backup is invisible until the day it is needed.
 var (
 	ErrLockTimeout = errors.New("timed out waiting for the job lock")
-	ErrStopping    = errors.New("the container is stopping")
+	ErrStopping    = errors.New("the container is stopping or draining")
 )
 
 // lockPoll is how often a waiting job retries the lock.
@@ -211,6 +212,21 @@ func (s *Store) Acquire(o LockOpts) (*Held, error) {
 
 // Stopping reports whether the runner has been asked to stop.
 func (s *Store) Stopping() bool { return s.HasFlag("stop.requested") }
+
+// Draining reports whether a pre-stop drain is counting down. Like Stopping it
+// means no new job may start; unlike Stopping the container is not going down
+// yet, and the flag is cleared again if the drain ends without a stop.
+func (s *Store) Draining() bool { return s.HasFlag("drain.requested") }
+
+// SetDraining and ClearDraining bracket a drain. Separate from the generic flag
+// helpers so the one caller that owns this flag is easy to find.
+func (s *Store) SetDraining() error { return s.SetFlag("drain.requested", "") }
+func (s *Store) ClearDraining()     { s.ClearFlag("drain.requested") }
+
+// Quiescing reports whether a new job may start at all: either the runner is
+// stopping, or a drain is counting down ahead of a stop. A job already holding
+// the lock is left alone — the stop path waits for it.
+func (s *Store) Quiescing() bool { return s.Stopping() || s.Draining() }
 
 // WaitLock blocks until the shared lock is free (used on the way down so a
 // running backup finishes before the container exits).

@@ -184,3 +184,44 @@ func TestAcquireGivesUpWhenStopping(t *testing.T) {
 		t.Fatal("waiter did not notice the stop")
 	}
 }
+
+func TestQuiescingCoversStoppingAndDraining(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if s.Quiescing() {
+		t.Fatal("a fresh store must let jobs start")
+	}
+
+	// A drain blocks new jobs without the container going down.
+	if err := s.SetDraining(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Draining() || !s.Quiescing() || s.Stopping() {
+		t.Fatalf("draining: Draining=%v Quiescing=%v Stopping=%v", s.Draining(), s.Quiescing(), s.Stopping())
+	}
+
+	// A cancelled eviction must leave the scheduler working.
+	s.ClearDraining()
+	if s.Draining() || s.Quiescing() {
+		t.Fatal("clearing the drain must let jobs start again")
+	}
+
+	s.SetFlag("stop.requested", "")
+	if !s.Quiescing() {
+		t.Fatal("stopping must block new jobs")
+	}
+
+	// Init is what runs on a fresh container: a drain flag left behind by a
+	// SIGKILLed drain must not silence the next container's scheduler.
+	if err := s.SetDraining(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if s.Draining() || s.Quiescing() {
+		t.Fatal("Init must clear a stale drain flag")
+	}
+}

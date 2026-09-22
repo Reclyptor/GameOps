@@ -191,7 +191,7 @@ func cmdRun() int {
 func acquireJobLock(a *app, job string) (*state.Held, error) {
 	h, err := a.st.Acquire(state.LockOpts{
 		Timeout: time.Duration(a.cfg.LockTimeout) * time.Second,
-		Abort:   a.st.Stopping,
+		Abort:   a.st.Quiescing,
 		Waiting: func() {
 			logx.Infof("%s: another job or a relaunch holds the job lock; waiting up to %ds", job, a.cfg.LockTimeout)
 		},
