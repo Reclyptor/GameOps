@@ -23,6 +23,8 @@ Installed at `/opt/gameops`: one static binary and a small bash shim. Game image
 | `gameops backup list` · `backup verify [archive\|latest]` | List this game's archives, newest first; read one back end to end and confirm it holds every current backup path. |
 | `gameops restore <archive\|latest> [--no-backup]` | Put an archive back: verify, warn players, safety backup, graceful stop, swap, relaunch in place (§4.5). |
 | `gameops update` | One update check: detect → warn players → back up → request restart. Also the scheduled job. |
+| `gameops drain [--deadline <seconds>]` | Block until stopping the server is acceptable, then exit 0: the orchestrator's pre-stop hook (§4.9). Warns players with the same countdown an update uses, bounded by the deadline. No new job starts while it runs. |
+| `gameops drain --required-grace [--deadline <seconds>]` | Print the minimum termination grace period the deadline needs, and exit. |
 | `gameops notify <EVENT> [key=value…]` | Send one lifecycle notification. |
 | `gameops console <line>` | Write a line to the server's stdin. |
 | `gameops health` | Health check; exit 0 when healthy. Wire it as the image `HEALTHCHECK`. |
@@ -256,9 +258,10 @@ without anyone noticing.
   until the relaunched server is ready. A job that was waiting therefore runs against a live server,
   never one that is half way through a relaunch. If the runner cannot get the lock within
   `LOCK_TIMEOUT` it relaunches anyway and logs a warning; the relaunch is never held hostage.
-- **Nothing starts on a stopping container.** Once a stop is requested a waiting job gives up, and
-  so does one that would have started; it logs a warning and exits non-zero. The shutdown saves
-  the world itself.
+- **Nothing starts on a stopping or draining container.** Once a stop is requested a waiting job
+  gives up, and so does one that would have started; it logs a warning and exits non-zero. The
+  shutdown saves the world itself. A drain (§4.9) counts the same way: it blocks jobs that have not
+  started, while a job already holding the lock is left to finish.
 - **Giving up is loud.** A job that is still waiting after `LOCK_TIMEOUT` exits non-zero with
   `… not started: timed out waiting for the job lock after Ns`; a backup also sends
   `BACKUP_FAILED` and counts in `backup_failures_total`.
@@ -268,6 +271,36 @@ countdown (`max(UPDATE_WARN_MINUTES, UPDATE_FORCE_AFTER_MINUTES)`), `STOP_TIMEOU
 `UPDATE_APPLY_TIMEOUT` and `READY_TIMEOUT`, plus an hour for the backups taken along the way
 (10020 s with the defaults) — so raising any of those limits never makes a job give up on a holder
 that is still doing its job. `0` means a single attempt.
+
+### 4.9 Draining before a stop (`gameops drain`)
+An orchestrator restart — a new image, a node drain, a rescheduled pod — sends `SIGTERM` straight to
+PID 1, so none of the update path's courtesy applies and players learn about it from the
+disconnect. `gameops drain` is the pre-stop hook that closes that gap: it blocks until stopping is
+acceptable, then exits 0, and only then does the orchestrator send `SIGTERM`.
+
+It runs the same countdown an update runs, with the reason `for maintenance`, so what players see
+does not depend on where the restart came from:
+
+| The game | Drain does |
+|---|---|
+| nobody online | returns at once |
+| supports `game_broadcast` | counts down in-game, returning the moment the server empties |
+| does not | waits for an empty server, then returns anyway at the deadline |
+| tracks no players at all | reports 0 and returns at once |
+
+**The deadline is the safety property.** A pre-stop hook runs *inside* the orchestrator's grace
+period, so a drain still counting down when that period expires is `SIGKILL`ed and the graceful stop
+never happens — strictly worse than not draining. `--deadline` bounds the wait absolutely, and
+`gameops drain --required-grace` prints the smallest grace period that deadline needs
+(`deadline + STOP_TIMEOUT + 60`), derived here rather than written into a manifest by hand so the two
+cannot drift apart.
+
+Drain does **not** take the job lock: a backup already running should finish while players are being
+warned, and the stop path waits for it. It sets a drain flag for its duration so no *new* job starts
+behind it, and clears the flag on return — a cancelled eviction must leave the scheduler working.
+
+Drain also does not stop the server, and does not decide whether to. The stop is `SIGTERM` →
+`STOP` → `game_shutdown` → `STOP_TIMEOUT` → `SIGKILL`, unchanged.
 
 ## 5. The settled-file guard
 Games without `game_save` (or whose save is asynchronous) can be mid-write when the archive is

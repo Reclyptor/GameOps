@@ -211,6 +211,37 @@ wait_for_log 'Smoke is ready' 30 5
 [[ "$(metric updates_total)" == 1 && "$(metric update_pending)" == 0 && "$(metric server_restarts_total)" == 4 ]] || fail "update counters not updated"
 docker exec "$name" gameops http get http://127.0.0.1:9110/metrics | grep -q 'server_version="1.1.0"' || fail "server_version not refreshed after the update"
 
+step "drain warns players, blocks new jobs, and returns once the server empties"
+# The grace period a manifest needs is derived by the toolkit, never written
+# down twice: 300 drain + STOP_TIMEOUT (15 here) + 60 margin.
+grace=$(docker exec "$name" gameops drain --required-grace --deadline 300)
+[[ "$grace" == 375 ]] || fail "drain --required-grace should be 375 with STOP_TIMEOUT=15, got ${grace}"
+# Nobody online: a drain must not wait at all.
+docker exec "$name" gameops drain --deadline 120 || fail "a drain on an empty server must exit 0 at once"
+# With a player online it counts down in-game rather than dropping them.
+docker exec "$name" gameops console fakejoin Alice
+for (( i = 0; i < 15; i++ )); do [[ "$(docker exec "$name" gameops players)" == 1 ]] && break; sleep 1; done
+[[ "$(docker exec "$name" gameops players)" == 1 ]] || fail "fakejoin did not register a player"
+docker exec -d "$name" sh -c 'gameops drain --deadline 120 > /tmp/drain.log 2>&1; echo $? > /tmp/drain.rc.tmp && mv /tmp/drain.rc.tmp /tmp/drain.rc'
+wait_for_log '\[broadcast\] Server restarting for maintenance in 2 minutes' 20
+# No new job may start behind a drain. (One already running keeps the lock and
+# is left to finish; the stop path waits for it.)
+if out=$(docker exec "$name" gameops backup 2>&1); then
+    fail "a backup must not start during a drain: ${out}"
+fi
+grep -q "stopping or draining" <<<"$out" || fail "a backup blocked by a drain should say why: ${out}"
+# The player leaves; the drain must notice and return inside its budget.
+docker exec "$name" gameops console fakeleave Alice
+for (( i = 0; i < 90; i++ )); do
+    docker exec "$name" test -f /tmp/drain.rc 2>/dev/null && break
+    sleep 1
+done
+docker exec "$name" test -f /tmp/drain.rc 2>/dev/null || fail "the drain did not return after the server emptied"
+drain_rc=$(docker exec "$name" cat /tmp/drain.rc)
+[[ "$drain_rc" == 0 ]] || fail "drain exited ${drain_rc}: $(docker exec "$name" cat /tmp/drain.log)"
+# ...and the flag must be gone, or the scheduler would stay silenced for good.
+docker exec "$name" gameops backup >/dev/null 2>&1 || fail "a backup must run again once the drain is over"
+
 step "graceful stop on SIGTERM"
 docker stop -t 30 "$name" >/dev/null
 [[ "$(docker inspect -f '{{.State.ExitCode}}' "$name")" == 0 ]] || fail "expected exit 0 after SIGTERM, got $(docker inspect -f '{{.State.ExitCode}}' "$name")"
