@@ -164,3 +164,20 @@ func TestDisabledEventsPolicy(t *testing.T) {
 		t.Fatal("a bare ! should be an error")
 	}
 }
+
+func TestRequiredGraceTracksStopTimeout(t *testing.T) {
+	// The grace period must always outlast the drain plus the graceful stop, or
+	// the orchestrator SIGKILLs the container mid-save.
+	c := &Config{StopTimeout: 120}
+	if got, want := c.RequiredGrace(300), 300+120+graceMargin; got != want {
+		t.Errorf("RequiredGrace(300) = %d, want %d", got, want)
+	}
+	// Raising STOP_TIMEOUT must raise the requirement, not be silently ignored.
+	slower := &Config{StopTimeout: 600}
+	if slower.RequiredGrace(300) <= c.RequiredGrace(300) {
+		t.Error("a longer STOP_TIMEOUT must require a longer grace period")
+	}
+	if got := c.RequiredGrace(0); got != 120+graceMargin {
+		t.Errorf("RequiredGrace(0) = %d, want %d", got, 120+graceMargin)
+	}
+}

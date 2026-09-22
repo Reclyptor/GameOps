@@ -225,6 +225,20 @@ func Load() (*Config, error) {
 // holds the job lock, and a backup already running when a job arrives.
 const lockBackupAllowance = 3600
 
+// graceMargin is slack between a drain returning and the orchestrator's
+// deadline: the stop path still has to notify, ask the game to save and wait
+// for the process to go.
+const graceMargin = 60
+
+// RequiredGrace is the smallest terminationGracePeriodSeconds that can hold a
+// drain of drainSeconds followed by the graceful stop. Derived rather than
+// written down in the manifests, so raising STOP_TIMEOUT cannot silently make a
+// configured grace period too short — which would turn a clean save into a
+// SIGKILL.
+func (c *Config) RequiredGrace(drainSeconds int) int {
+	return drainSeconds + c.StopTimeout + graceMargin
+}
+
 // lockTimeoutDefault outlasts the longest legitimate hold of the job lock: an
 // update or restore counts down, stops the server, applies or swaps, and waits
 // for the relaunch to be ready. Derived, so raising any of those limits keeps

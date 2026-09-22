@@ -110,6 +110,8 @@ func dispatch(cmd string, args []string) int {
 		return cmdRestore(args)
 	case "update":
 		return cmdLocked("update", func(a *app) error { return a.up.Check() })
+	case "drain":
+		return cmdDrain(args)
 	case "health":
 		return cmdHealth()
 	case "notify":
@@ -202,6 +204,52 @@ func acquireJobLock(a *app, job string) (*state.Held, error) {
 		err = fmt.Errorf("not started: %w", err)
 	}
 	return h, err
+}
+
+// cmdDrain is the orchestrator's pre-stop hook: it blocks until stopping the
+// server is acceptable, then exits 0. It deliberately does NOT take the job
+// lock — a backup already running should finish while players are being warned,
+// and the stop path waits for it. Drain only stops *new* jobs starting.
+//
+// --required-grace prints the minimum terminationGracePeriodSeconds for the
+// budget instead of draining, so a manifest and this binary cannot drift.
+func cmdDrain(args []string) int {
+	const usage = "usage: gameops drain [--deadline <seconds>] [--required-grace]"
+	deadline, haveDeadline, printGrace := 0, false, false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--required-grace":
+			printGrace = true
+		case "--deadline":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, usage)
+				return 64
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || n < 0 {
+				fmt.Fprintf(os.Stderr, "drain: --deadline wants a non-negative integer, got %q\n", args[i+1])
+				return 64
+			}
+			deadline, haveDeadline = n, true
+			i++
+		default:
+			fmt.Fprintf(os.Stderr, "drain: unknown argument %q\n%s\n", args[i], usage)
+			return 64
+		}
+	}
+	a, err := boot()
+	if err != nil {
+		return fail(err)
+	}
+	if !haveDeadline {
+		deadline = max(a.cfg.UpdateWarnMinutes, a.cfg.UpdateForceAfterMinutes) * 60
+	}
+	if printGrace {
+		fmt.Println(a.cfg.RequiredGrace(deadline))
+		return 0
+	}
+	a.up.Drain(update.BudgetMinutes(deadline))
+	return 0
 }
 
 // cmdLocked runs fn under the job lock. A job that cannot run exits non-zero:
