@@ -57,6 +57,8 @@ the standard library alone in a `debian:trixie-slim` stage with the distribution
 | `run` | PID-1 init (re-execs itself, forwards signals, reaps orphans) around the supervisor loop. |
 | `backup` / `update` | The scheduled jobs, also runnable by hand; they take turns on one shared file lock. `backup list` and `backup verify` read archives back. |
 | `restore` | Verified archive → countdown → safety backup → graceful stop → staged swap → relaunch in place. |
+| `drain` | Blocks until stopping the server is acceptable, then returns. The orchestrator's
+pre-stop hook; see §5. |
 | `notify` / `console` / `health` | Lifecycle helpers; `health` and `/healthz` share one check. |
 | `/metrics`, `/healthz` | Served by `run` on `METRICS_PORT` (Prometheus text, rendered by hand); all values read from the state directory and `BACKUP_DIR` at request time. |
 | `rcon` / `http` / `json` / `steam` / `players` / `wait-settled` / `tcp-open` | Adapter helpers, exposed as bash functions by the shim. |
@@ -118,7 +120,112 @@ the standard library alone in a `debian:trixie-slim` stage with the distribution
 
 ---
 
-## 5. CI
+## 5. Orchestrated restarts (`gameops drain`)
+
+### The gap this closes
+
+G3 says updates relaunch in place, and the countdown makes those restarts
+polite: players are warned at `UPDATE_WARN_MINUTES` and the server empties on
+its own where it can. None of that runs when the restart comes from *outside*
+the container. A new image, a node drain or a rescheduled pod sends `SIGTERM`
+straight to PID 1, and the first thing players know about it is the
+disconnect. The toolkit's entire graceful-restart design is bypassed by the
+layer above it.
+
+`gameops drain` closes that gap by making the orchestrator's restart take the
+same countdown the toolkit's own restart already takes.
+
+### The subcommand
+
+```
+gameops drain [--deadline <seconds>]
+gameops drain --required-grace
+```
+
+`drain` blocks until stopping the server is acceptable, then returns `0`. It
+runs the same `Countdown()` the update path runs, with the reason
+`for maintenance`, so what players see does not depend on where the restart
+came from.
+
+It is called from the orchestrator's pre-stop hook. Kubernetes runs the hook,
+waits for it to return, and only then sends `SIGTERM`.
+
+### Behaviour, by what the game supports (G2)
+
+| Game can | Drain does |
+|---|---|
+| Nobody online | Returns immediately |
+| `game_broadcast` | Counts down in-game at the `CountdownMarks`, returning the moment the server empties |
+| No `game_broadcast` | Waits for an empty server up to `UPDATE_FORCE_AFTER_MINUTES`, then returns anyway |
+| No player tracking at all | Reports 0 players and returns immediately |
+
+Never fails, never blocks forever. A game that cannot warn its players still
+drains; it just waits instead of counting down.
+
+### The deadline is the safety property
+
+This is the part that makes `drain` correct or dangerous, and it is worth
+stating plainly: **a pre-stop hook runs inside the orchestrator's grace
+period.** If `drain` is still counting down when that period expires, the
+container is `SIGKILL`ed and the graceful stop — the save — never happens. A
+drain that overruns its budget is strictly worse than no drain at all, because
+it converts a clean save into a hard kill.
+
+Therefore:
+
+- `--deadline` bounds the wait absolutely. `drain` returns by then whatever the
+  player count.
+- The default deadline is derived, not guessed:
+  `max(UPDATE_WARN_MINUTES, UPDATE_FORCE_AFTER_MINUTES) × 60`.
+- The deadline must leave room for the stop that follows it. `drain
+  --required-grace` prints `deadline + STOP_TIMEOUT + margin` — the minimum the
+  orchestrator's grace period must be — derived the same way
+  `lockTimeoutDefault` is derived, so the manifest and the toolkit cannot drift
+  apart as those limits change.
+
+A caller that sets a grace period below `--required-grace` is misconfigured, and
+the number exists so that is checkable rather than discovered during an incident.
+
+### No job may start during a drain
+
+The lock design already guarantees that nothing starts on a *stopping*
+container. A drain is not yet a stop: the hook runs before `SIGTERM`, so from
+the scheduler's point of view the container is running normally. Without care, a
+nightly backup firing during a fifteen-minute drain would still hold the lock
+when `SIGTERM` lands, and the stop path — which waits for a running job — would
+push past the grace period and be killed.
+
+`drain` therefore sets a `drain.requested` flag that the scheduler honours the
+way it honours a stopping container: **no new job starts once a drain is under
+way.** A job already running is allowed to finish. The flag clears if the drain
+returns without a stop following it, so a cancelled eviction leaves the
+scheduler working normally.
+
+### What `drain` deliberately does not do
+
+It does not stop the server. It returns when stopping is acceptable; the stop
+itself remains `SIGTERM` → notify `STOP` → `game_shutdown` → `STOP_TIMEOUT` →
+`SIGKILL`, unchanged. `drain` adds no new stop semantics and no new way for the
+server to go down.
+
+It also does not decide *whether* to restart. That judgement belongs to whoever
+sent the eviction.
+
+### Verification
+
+- `go test ./...`: the deadline is honoured exactly; an empty server returns
+  immediately; the broadcast and no-broadcast paths both terminate; the
+  `drain.requested` flag blocks a new job and clears afterwards;
+  `--required-grace` tracks changes to `UPDATE_WARN_MINUTES`,
+  `UPDATE_FORCE_AFTER_MINUTES` and `STOP_TIMEOUT`.
+- `tests/smoke.sh`: a drain with a player online counts down and returns early
+  when that player leaves; a drain with a player who stays returns at its
+  deadline; a backup cannot start once a drain is under way; a drain followed by
+  `SIGTERM` still produces a clean save within the grace period.
+
+---
+
+## 6. CI
 
 `.github/workflows/build.yml`: `lint` (gofmt, go vet, go test, shellcheck) and `test`
 (`tests/smoke.sh`) gate `build`, which pushes to ghcr on `master` with `latest`, a sortable
@@ -127,7 +234,7 @@ the full semver.
 
 ---
 
-## 6. Verification
+## 7. Verification
 
 - `go test ./...`: cron parsing and scheduling, the RCON client against an in-process fake server
   (auth, single and multi-packet replies), JSON get/set/escape, notification rendering and
