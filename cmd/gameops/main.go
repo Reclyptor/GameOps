@@ -40,6 +40,7 @@ const usage = `usage: gameops <command> [args]
 
 lifecycle   run | backup [list | verify [archive|latest]] | restore <archive|latest> [--no-backup]
             update | health | notify <EVENT> [key=value ...] | console <line>
+            drain [--deadline <seconds>] [--required-grace]
 adapters    rcon <command...>            http get [-o file] <url>
             json get <file|-> <path>     json set <file> <path> <value> [--raw]
             json escape <string>         json array [items...]
