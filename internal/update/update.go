@@ -93,16 +93,26 @@ func (u *Updater) RestartNote() string {
 	return "restarting once the server is empty"
 }
 
-// Countdown returns once it is acceptable to restart the server: at once
+// Countdown returns once it is acceptable to restart the server, using the
+// configured update patience. See CountdownWithin.
+func (u *Updater) Countdown(reason string) {
+	u.CountdownWithin(reason, u.Cfg.UpdateWarnMinutes, u.Cfg.UpdateForceAfterMinutes)
+}
+
+// CountdownWithin returns once it is acceptable to restart the server: at once
 // when nobody is online, after the in-game countdown when the game can
 // broadcast (reason completes "Server restarting … in N minutes"), otherwise
-// after the server empties or UPDATE_FORCE_AFTER_MINUTES pass.
-func (u *Updater) Countdown(reason string) {
+// after the server empties or forceAfterMinutes pass.
+//
+// The budget is a parameter rather than read from the configuration because a
+// drain ahead of an eviction is deliberately less patient than a routine
+// update: something wants the node back.
+func (u *Updater) CountdownWithin(reason string, warnMinutes, forceAfterMinutes int) {
 	if u.PlayerCount() == 0 {
 		return
 	}
 	if u.Ad.Supports("game_broadcast") {
-		marks := CountdownMarks(u.Cfg.UpdateWarnMinutes)
+		marks := CountdownMarks(warnMinutes)
 		for i, mark := range marks {
 			next := 0
 			if i+1 < len(marks) {
@@ -127,11 +137,11 @@ func (u *Updater) Countdown(reason string) {
 		}
 		return
 	}
-	logx.Infof("players online and the game cannot broadcast; waiting up to %d min for an empty server", u.Cfg.UpdateForceAfterMinutes)
-	if u.sleepWatching(u.Cfg.UpdateForceAfterMinutes) {
+	logx.Infof("players online and the game cannot broadcast; waiting up to %d min for an empty server", forceAfterMinutes)
+	if u.sleepWatching(forceAfterMinutes) {
 		return
 	}
-	logx.Warnf("server still not empty after %d min; restarting anyway", u.Cfg.UpdateForceAfterMinutes)
+	logx.Warnf("server still not empty after %d min; restarting anyway", forceAfterMinutes)
 }
 
 // StopForRelaunch records why the server is being stopped (an update target
